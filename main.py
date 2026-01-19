@@ -3,6 +3,7 @@ import re
 import json
 from uuid import UUID
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -19,6 +20,15 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI()
+
+# Enable CORS for all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class DocumentRequest(BaseModel):
@@ -37,7 +47,7 @@ def extract_labels(text: str):
     
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
@@ -78,7 +88,7 @@ def extract_key_points(text: str):
     
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
@@ -141,5 +151,118 @@ def get_document(req: DocumentRequest):
     
     # Filter out labels with null/None values
     filtered_labels = {k: v for k, v in labels.items() if v is not None and v != "" and v != "null"}
+    
+    # Prepare result data
+    result_data = json.dumps({
+        'labels': filtered_labels,
+        'key_points': key_points
+    })
+    
+    # Save processed data to document_processed_data table
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        # Create table if it doesn't exist
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS document_processed_data (
+                id SERIAL PRIMARY KEY,
+                document_id UUID NOT NULL,
+                result TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Insert processed data
+        cur.execute(
+            'INSERT INTO document_processed_data (document_id, result) VALUES (%s, %s)',
+            (document_id_param, result_data)
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        # Log error but don't fail the request
+        print(f'Warning: Failed to save processed data: {e}')
 
-    return {'project_id': project_id, 'labels': filtered_labels, 'key_points': key_points}
+    return {
+        'status': 'success',
+        'message': 'Document processed successfully',
+        'project_id': project_id,
+        'labels': filtered_labels,
+        'key_points': key_points
+    }
+
+
+def generate_summary(result_text: str):
+    """Generate a designed document summary using OpenAI gpt-4o-mini."""
+    
+    if not client:
+        return "OpenAI client not configured"
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a professional document summarizer. Create a well-structured, concise document summary based on the provided extracted data (labels and key points). Format the summary in clear paragraphs with proper markdown formatting. Include a brief executive overview followed by detailed sections. Make it professional and easy to understand."
+                },
+                {
+                    "role": "user", 
+                    "content": f"Based on the following extracted document data, create a professional summary:\n\n{result_text}"
+                }
+            ],
+            temperature=0.5,
+            max_tokens=2000
+        )
+        
+        summary = response.choices[0].message.content.strip()
+        return summary
+            
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"
+
+
+class SummaryRequest(BaseModel):
+    document_id: UUID
+
+
+@app.post('/summary')
+def get_summary(req: SummaryRequest):
+    document_id = req.document_id
+    document_id_param = str(document_id)
+    
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail='DATABASE_URL not configured')
+    
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch the most recent processed data for this document
+        cur.execute(
+            'SELECT id, result FROM document_processed_data WHERE document_id = %s ORDER BY created_at DESC LIMIT 1',
+            (document_id_param,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Database query failed: {e}')
+    
+    if not row:
+        raise HTTPException(status_code=404, detail='No processed data found for this document')
+    
+    result_text = row.get('result')
+    
+    # Generate summary from the processed data
+    summary = generate_summary(result_text)
+    
+    return {
+        'status': 'success',
+        'message': 'Summary generated successfully',
+        'document_id': document_id_param,
+        'summary': summary
+    }
