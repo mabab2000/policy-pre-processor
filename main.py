@@ -173,10 +173,23 @@ def get_document(req: DocumentRequest):
             )
         """)
         
-        # Insert processed data
+        # Upsert processed data to avoid duplicates per document_id
         cur.execute(
-            'INSERT INTO document_processed_data (document_id, result) VALUES (%s, %s)',
+            '''
+            INSERT INTO document_processed_data (document_id, result)
+            VALUES (%s, %s)
+            ON CONFLICT (document_id)
+            DO UPDATE SET
+                result = EXCLUDED.result,
+                created_at = CURRENT_TIMESTAMP
+            ''',
             (document_id_param, result_data)
+        )
+
+        # Mark document as analysed
+        cur.execute(
+            'UPDATE documents SET analysed = TRUE WHERE id = %s',
+            (document_id_param,)
         )
         
         conn.commit()
