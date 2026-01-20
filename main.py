@@ -166,8 +166,9 @@ def get_document(req: DocumentRequest):
         # Create table if it doesn't exist
         cur.execute("""
             CREATE TABLE IF NOT EXISTS document_processed_data (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 document_id UUID NOT NULL,
+                project_id UUID,
                 result TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -176,14 +177,15 @@ def get_document(req: DocumentRequest):
         # Upsert processed data to avoid duplicates per document_id
         cur.execute(
             '''
-            INSERT INTO document_processed_data (document_id, result)
-            VALUES (%s, %s)
+            INSERT INTO document_processed_data (document_id, project_id, result)
+            VALUES (%s, %s, %s)
             ON CONFLICT (document_id)
             DO UPDATE SET
+                project_id = EXCLUDED.project_id,
                 result = EXCLUDED.result,
                 created_at = CURRENT_TIMESTAMP
             ''',
-            (document_id_param, result_data)
+            (document_id_param, str(project_id) if project_id else None, result_data)
         )
 
         # Mark document as analysed
